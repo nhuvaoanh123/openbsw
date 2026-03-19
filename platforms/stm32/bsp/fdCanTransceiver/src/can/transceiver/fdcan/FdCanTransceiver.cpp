@@ -8,8 +8,11 @@
  *
  * Design overview:
  * - Lifecycle follows CLOSED -> INITIALIZED -> OPEN -> MUTED -> CLOSED.
- * - TX path is synchronous: write() calls FdCanDevice::transmit() and notifies
- *   sent-listeners in the same call context.
+ * - TX without listener: synchronous transmit + notifySentListeners.
+ * - TX with listener: queued async pattern matching S32K CanFlex2Transceiver:
+ *   write() queues {listener, frame} into fTxQueue, TX ISR defers to task
+ *   context via async::execute, canFrameSentAsyncCallback() pops queue,
+ *   notifies listener, and sends next queued frame.
  * - RX path is interrupt-driven: receiveInterrupt() is called from the CAN RX
  *   ISR, which copies frames into a software queue inside FdCanDevice. The ISR
  *   handler disables further RX interrupts to prevent re-entry. receiveTask()
@@ -33,6 +36,10 @@ FdCanTransceiver::FdCanTransceiver(
 , fDevice(devConfig)
 , fContext(context)
 , fCyclicTimeout()
+, _canFrameSent(
+      ::async::Function::CallType::
+          create<FdCanTransceiver, &FdCanTransceiver::canFrameSentAsyncCallback>(*this))
+, fTxQueue()
 , fMuted(false)
 {
     if (busId < 3U)
@@ -134,12 +141,37 @@ void FdCanTransceiver::shutdown() { close(); }
 ::can::ICanTransceiver::ErrorCode
 FdCanTransceiver::write(::can::CANFrame const& frame, ::can::ICANFrameSentListener& listener)
 {
-    ErrorCode const result = write(frame);
-    if (result == ErrorCode::CAN_ERR_OK)
+    if (getState() != State::OPEN || fMuted)
     {
-        listener.canFrameSent(frame);
+        return ErrorCode::CAN_ERR_TX_OFFLINE;
     }
-    return result;
+
+    if (fTxQueue.full())
+    {
+        return ErrorCode::CAN_ERR_TX_HW_QUEUE_FULL;
+    }
+
+    bool const wasEmpty = fTxQueue.empty();
+    fTxQueue.emplace_back(listener, frame);
+
+    if (!wasEmpty)
+    {
+        // Next frame will be sent from TX ISR callback chain.
+        return ErrorCode::CAN_ERR_OK;
+    }
+
+    // We are the first sender — transmit with TX event enabled.
+    fDevice.fTxEventEnabled = true;
+    if (!fDevice.transmit(frame))
+    {
+        fDevice.fTxEventEnabled = false;
+        fTxQueue.pop_front();
+        return ErrorCode::CAN_ERR_TX_HW_QUEUE_FULL;
+    }
+    fDevice.fTxEventEnabled = false;
+
+    // Wait until TX interrupt triggers canFrameSentCallback().
+    return ErrorCode::CAN_ERR_OK;
 }
 
 uint32_t FdCanTransceiver::getBaudrate() const { return 500000U; }
@@ -150,8 +182,11 @@ uint8_t FdCanTransceiver::receiveInterrupt(uint8_t transceiverIndex)
 {
     if (transceiverIndex < 3U && fpTransceivers[transceiverIndex] != nullptr)
     {
-        return fpTransceivers[transceiverIndex]->fDevice.receiveISR(
-            fpTransceivers[transceiverIndex]->_filter.getRawBitField());
+        // Accept all frames into the software queue — per-listener filtering
+        // is done by notifyListeners() in receiveTask(), matching the S32K
+        // CanFlex2Transceiver pattern. ISR-level filtering would require
+        // merging all listener filters, which the base class doesn't support.
+        return fpTransceivers[transceiverIndex]->fDevice.receiveISR(nullptr);
     }
     return 0U;
 }
@@ -160,7 +195,57 @@ void FdCanTransceiver::transmitInterrupt(uint8_t transceiverIndex)
 {
     if (transceiverIndex < 3U && fpTransceivers[transceiverIndex] != nullptr)
     {
-        fpTransceivers[transceiverIndex]->fDevice.transmitISR();
+        FdCanTransceiver* self = fpTransceivers[transceiverIndex];
+        self->fDevice.transmitISR();
+
+        if (!self->fTxQueue.empty())
+        {
+            self->canFrameSentCallback();
+        }
+    }
+}
+
+void FdCanTransceiver::canFrameSentCallback() { ::async::execute(fContext, _canFrameSent); }
+
+void FdCanTransceiver::canFrameSentAsyncCallback()
+{
+    if (!fTxQueue.empty())
+    {
+        bool sendAgain = false;
+        {
+            TxJobWithCallback& job                 = fTxQueue.front();
+            ::can::CANFrame const& frame           = job._frame;
+            ::can::ICANFrameSentListener& listener = job._listener;
+            fTxQueue.pop_front();
+
+            if (!fTxQueue.empty())
+            {
+                // Send again only if same precondition as for write() is satisfied.
+                State const state = getState();
+                if ((State::OPEN == state) || (State::INITIALIZED == state))
+                {
+                    sendAgain = true;
+                }
+                else
+                {
+                    fTxQueue.clear();
+                }
+            }
+
+            listener.canFrameSent(frame);
+            notifyRegisteredSentListener(frame);
+        }
+
+        if (sendAgain)
+        {
+            ::can::CANFrame const& frame = fTxQueue.front()._frame;
+            fDevice.fTxEventEnabled = true;
+            if (!fDevice.transmit(frame))
+            {
+                fTxQueue.clear();
+            }
+            fDevice.fTxEventEnabled = false;
+        }
     }
 }
 

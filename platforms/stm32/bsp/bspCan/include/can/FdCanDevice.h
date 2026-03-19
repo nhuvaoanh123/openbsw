@@ -183,6 +183,9 @@ private:
     uint8_t fRxCount;                        ///< Number of frames currently in the queue
     bool fInitialized;                       ///< Set true after init() completes
 
+public:
+    bool fTxEventEnabled{false};             ///< When true, TX buffer sets EFC=1 for TX Event FIFO
+
     void enterInitMode();
     void leaveInitMode();
     void configureBitTiming();

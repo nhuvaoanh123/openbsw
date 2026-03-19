@@ -14,6 +14,8 @@ target_include_directories(${bspInterruptsImplName} PUBLIC include)
 
 if (BUILD_TARGET_RTOS STREQUAL "FREERTOS")
     target_include_directories(${bspInterruptsImplName} PUBLIC freertos/include)
+elseif (BUILD_TARGET_RTOS STREQUAL "THREADX")
+    target_include_directories(${bspInterruptsImplName} PUBLIC threadx/include)
 endif ()
 
 target_link_libraries(${bspInterruptsImplName} PRIVATE bspMcu platform)

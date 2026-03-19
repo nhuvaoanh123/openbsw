@@ -86,7 +86,8 @@ static uint32_t getInstanceRamBase(FDCAN_GlobalTypeDef* fdcan)
 
 static constexpr uint32_t STD_FILTER_OFFSET = 0x000U;
 static constexpr uint32_t RX_FIFO0_OFFSET   = 0x0B0U;
-static constexpr uint32_t TX_BUFFER_OFFSET  = 0x128U;
+// STM32G4 message RAM: TX buffers at 0x278 (not 0x128 as standard M_CAN)
+static constexpr uint32_t TX_BUFFER_OFFSET  = 0x278U;
 
 FdCanDevice::FdCanDevice(Config const& config)
 : fConfig(config), fRxQueue{}, fRxHead(0U), fRxCount(0U), fInitialized(false)
@@ -197,16 +198,18 @@ void FdCanDevice::start()
         return;
     }
 
-    // Configure interrupts while still in init mode (CCCR.CCE=1, CCCR.INIT=1).
-    // IE, ILS, ILE are only writable when CCE and INIT are set.
-    fConfig.baseAddress->IE |= FDCAN_IE_RF0NE | FDCAN_IE_TCE;
-    // STM32G4 ILS uses grouped bits (not per-source like M_CAN on H7).
-    // SMSG group (bit 2) includes TX Complete — route it to interrupt line 1.
-    // RXFIFO0 group (bit 0) stays 0 → line 0.
-    fConfig.baseAddress->ILS = FDCAN_ILS_SMSG;
-    fConfig.baseAddress->ILE = FDCAN_ILE_EINT0 | FDCAN_ILE_EINT1;
+    // Write IE in init mode (may or may not persist on STM32G4)
+    fConfig.baseAddress->IE = FDCAN_IE_RF0NE | FDCAN_IE_TEFNE;
+    fConfig.baseAddress->ILS = 0U;
+    fConfig.baseAddress->ILE = FDCAN_ILE_EINT0;
+    fConfig.baseAddress->TXBTIE = 0x7U;
 
     leaveInitMode();
+
+    // Write IE again AFTER leaving init mode.
+    // On STM32G4, IE may only take effect outside init mode.
+    // The HAL (stm32g4xx_hal_fdcan.c:2787) also writes IE after Start().
+    fConfig.baseAddress->IE = FDCAN_IE_RF0NE | FDCAN_IE_TEFNE;
 }
 
 void FdCanDevice::stop()

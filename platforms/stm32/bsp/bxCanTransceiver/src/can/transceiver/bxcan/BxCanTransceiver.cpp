@@ -8,8 +8,14 @@
  *
  * Design overview:
  * - Lifecycle follows CLOSED -> INITIALIZED -> OPEN -> MUTED -> CLOSED.
- * - TX path is synchronous: write() calls BxCanDevice::transmit() and notifies
- *   sent-listeners in the same call context.
+ * - TX path with listener uses an async callback chain:
+ *     write(frame, listener) queues {listener, frame} into fTxQueue,
+ *     transmits the first frame. TX ISR calls canFrameSentCallback()
+ *     which defers to task context via async::execute. The async callback
+ *     pops the queue, calls listener.canFrameSent(), transmits the next
+ *     queued frame, and notifies registered sent listeners.
+ * - TX path without listener (fire-and-forget): write() calls
+ *     BxCanDevice::transmit() and notifies sent-listeners synchronously.
  * - RX path is interrupt-driven: receiveInterrupt() is called from the CAN RX
  *   ISR, which copies frames into a software queue inside BxCanDevice. The ISR
  *   handler disables further RX interrupts to prevent re-entry. receiveTask()
@@ -33,6 +39,10 @@ BxCanTransceiver::BxCanTransceiver(
 , fDevice(devConfig)
 , fContext(context)
 , fCyclicTimeout()
+, _canFrameSent(
+      ::async::Function::CallType::
+          create<BxCanTransceiver, &BxCanTransceiver::canFrameSentAsyncCallback>(*this))
+, fTxQueue()
 , fMuted(false)
 {
     if (busId < 3U)
@@ -86,6 +96,7 @@ BxCanTransceiver::BxCanTransceiver(
     }
 
     fDevice.stop();
+    fTxQueue.clear();
     setState(State::CLOSED);
     return ErrorCode::CAN_ERR_OK;
 }
@@ -100,6 +111,7 @@ void BxCanTransceiver::shutdown() { close(); }
     }
 
     fMuted = true;
+    fTxQueue.clear();
     setState(State::MUTED);
     return ErrorCode::CAN_ERR_OK;
 }
@@ -135,12 +147,34 @@ void BxCanTransceiver::shutdown() { close(); }
 ::can::ICanTransceiver::ErrorCode
 BxCanTransceiver::write(::can::CANFrame const& frame, ::can::ICANFrameSentListener& listener)
 {
-    ErrorCode const result = write(frame);
-    if (result == ErrorCode::CAN_ERR_OK)
+    if (getState() != State::OPEN || fMuted)
     {
-        listener.canFrameSent(frame);
+        return ErrorCode::CAN_ERR_TX_OFFLINE;
     }
-    return result;
+
+    if (fTxQueue.full())
+    {
+        return ErrorCode::CAN_ERR_TX_HW_QUEUE_FULL;
+    }
+
+    bool const wasEmpty = fTxQueue.empty();
+    fTxQueue.emplace_back(listener, frame);
+
+    if (!wasEmpty)
+    {
+        // Not the first in queue — will be sent from the TX ISR chain
+        return ErrorCode::CAN_ERR_OK;
+    }
+
+    // First in queue — transmit now
+    if (!fDevice.transmit(frame))
+    {
+        fTxQueue.pop_front();
+        return ErrorCode::CAN_ERR_TX_HW_QUEUE_FULL;
+    }
+
+    // Wait for TX ISR → canFrameSentCallback() → canFrameSentAsyncCallback()
+    return ErrorCode::CAN_ERR_OK;
 }
 
 uint32_t BxCanTransceiver::getBaudrate() const { return 500000U; }
@@ -151,8 +185,10 @@ uint8_t BxCanTransceiver::receiveInterrupt(uint8_t transceiverIndex)
 {
     if (transceiverIndex < 3U && fpTransceivers[transceiverIndex] != nullptr)
     {
-        return fpTransceivers[transceiverIndex]->fDevice.receiveISR(
-            fpTransceivers[transceiverIndex]->_filter.getRawBitField());
+        // Accept all frames into the software queue — per-listener filtering
+        // is done by notifyListeners() in receiveTask(), matching the S32K
+        // CanFlex2Transceiver pattern.
+        return fpTransceivers[transceiverIndex]->fDevice.receiveISR(nullptr);
     }
     return 0U;
 }
@@ -161,7 +197,13 @@ void BxCanTransceiver::transmitInterrupt(uint8_t transceiverIndex)
 {
     if (transceiverIndex < 3U && fpTransceivers[transceiverIndex] != nullptr)
     {
-        fpTransceivers[transceiverIndex]->fDevice.transmitISR();
+        BxCanTransceiver* self = fpTransceivers[transceiverIndex];
+        self->fDevice.transmitISR();
+
+        if (!self->fTxQueue.empty())
+        {
+            self->canFrameSentCallback();
+        }
     }
 }
 
@@ -212,7 +254,55 @@ void BxCanTransceiver::receiveTask()
 
 void BxCanTransceiver::canFrameSentCallback()
 {
-    // Called from async context after TX ISR
+    ::async::execute(fContext, _canFrameSent);
+}
+
+void BxCanTransceiver::canFrameSentAsyncCallback()
+{
+    if (!fTxQueue.empty())
+    {
+        // If transceiver is no longer OPEN (bus-off, muted, closed), drop
+        // all queued TX jobs without calling listeners.
+        if (getState() != State::OPEN)
+        {
+            fTxQueue.clear();
+            return;
+        }
+
+        TxJobWithCallback& job                 = fTxQueue.front();
+        ::can::CANFrame const& frame           = job._frame;
+        ::can::ICANFrameSentListener& listener = job._listener;
+        fTxQueue.pop_front();
+
+        bool sendAgain = false;
+        if (!fTxQueue.empty())
+        {
+            if (getState() == State::OPEN)
+            {
+                sendAgain = true;
+            }
+            else
+            {
+                fTxQueue.clear();
+            }
+        }
+
+        listener.canFrameSent(frame);
+        notifyRegisteredSentListener(frame);
+
+        if (sendAgain)
+        {
+            ::can::CANFrame const& nextFrame = fTxQueue.front()._frame;
+            if (fDevice.transmit(nextFrame))
+            {
+                // Wait for next TX ISR
+                return;
+            }
+            // HW queue full — no ISR will retrigger, clear remaining
+            fTxQueue.clear();
+            notifyRegisteredSentListener(nextFrame);
+        }
+    }
 }
 
 } // namespace bios
