@@ -80,7 +80,10 @@ extern "C"
 #endif
 
 #define configLIBRARY_LOWEST_INTERRUPT_PRIORITY      0x0F
-#define configLIBRARY_MAX_SYSCALL_INTERRUPT_PRIORITY 0x05
+// CAN ISR at priority 5 (0x50) must not be masked by BASEPRI.
+// BASEPRI = (this value << 4). With 5: BASEPRI=0x50 masks priority 5.
+// With 6: BASEPRI=0x60, priority 5 (0x50) is NOT masked.
+#define configLIBRARY_MAX_SYSCALL_INTERRUPT_PRIORITY 0x06
 
 #ifndef configKERNEL_INTERRUPT_PRIORITY
 #define configKERNEL_INTERRUPT_PRIORITY \

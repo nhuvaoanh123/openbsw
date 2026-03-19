@@ -60,8 +60,17 @@ void CanSystem::run()
 
     // Enable FDCAN IRQs after transceiver is open (not in setupApplicationsIsr,
     // because the async framework must be ready before ISRs fire)
-    SYS_SetPriority(FDCAN1_IT0_IRQn, 8);
-    SYS_SetPriority(FDCAN1_IT1_IRQn, 8);
+    // Priority must be >= configLIBRARY_MAX_SYSCALL_INTERRUPT_PRIORITY (5)
+    // for FreeRTOS API safety, and <= 5 so BASEPRI (0x50) doesn't mask it.
+    // Priority 8 (0x80) is masked by BASEPRI during FreeRTOS scheduling.
+    // Force IE register — FdCanDevice::start() should set this, but
+    // verify it persists after leaving init mode.
+    FDCAN1->IE  = FDCAN_IE_RF0NE | FDCAN_IE_TEFNE;
+    FDCAN1->ILS = 0U;
+    FDCAN1->ILE = FDCAN_ILE_EINT0;
+
+    SYS_SetPriority(FDCAN1_IT0_IRQn, 5);
+    SYS_SetPriority(FDCAN1_IT1_IRQn, 5);
     NVIC_ClearPendingIRQ(FDCAN1_IT0_IRQn);
     NVIC_ClearPendingIRQ(FDCAN1_IT1_IRQn);
     SYS_EnableIRQ(FDCAN1_IT0_IRQn);
@@ -117,48 +126,49 @@ extern "C"
  * \note RF0NE is disabled at entry and re-enabled either here (no frames) or
  *       in receiveTask() (frames dispatched) to prevent ISR storm.
  */
+/**
+ * Combined RX + TX ISR — all FDCAN1 interrupts routed to IT0.
+ * Checks IR register to determine if RX, TX, or both occurred.
+ */
 void call_can_isr_RX()
 {
-    // Disable RF0NE FIRST — FDCAN RX FIFO is only 3 deep, heavy bus refills
-    // before ISR returns. This prevents ISR re-entry that trapped the CPU.
-    // Re-enabled in receiveTask() after async task drains the software queue.
-    ::bios::FdCanTransceiver::disableRxInterrupt(::busid::CAN_0);
-
-    // asyncEnterIsrGroup/leaveIsrGroup required for async::execute() to
-    // properly notify the FreeRTOS task. Safe now because RF0NE is off —
-    // ISR won't re-enter even with getSystemTicks overhead.
     ::asyncEnterIsrGroup(ISR_GROUP_CAN);
 
-    uint8_t framesReceived;
+    // Check for RX (RF0NE)
+    volatile uint32_t* fdcan = reinterpret_cast<volatile uint32_t*>(0x40006400U);
+    uint32_t ir = fdcan[0x50 / 4]; // IR register
+
+    if ((ir & 0x01U) != 0U) // RF0N — RX FIFO 0 new message
     {
-        ::async::LockType const lock;
-        framesReceived = ::bios::FdCanTransceiver::receiveInterrupt(::busid::CAN_0);
+        uint8_t framesReceived;
+        {
+            ::async::LockType const lock;
+            framesReceived = ::bios::FdCanTransceiver::receiveInterrupt(::busid::CAN_0);
+        }
+
+        if (framesReceived > 0)
+        {
+            ::systems::CanSystem::instance().dispatchRxTask();
+        }
     }
 
-    if (framesReceived > 0)
+    if ((ir & 0x400U) != 0U) // TEFN (bit 10) — TX Event FIFO New Entry
     {
-        ::systems::CanSystem::instance().dispatchRxTask();
+        ::bios::FdCanTransceiver::transmitInterrupt(::busid::CAN_0);
     }
-    else
+
+    // Defensive: restore IE if it got corrupted
+    volatile uint32_t* fdcan_ie = reinterpret_cast<volatile uint32_t*>(0x40006454U);
+    if ((*fdcan_ie & 0x401U) != 0x401U) // RF0NE(bit0) + TEFNE(bit10)
     {
-        ::bios::FdCanTransceiver::enableRxInterrupt(::busid::CAN_0);
+        *fdcan_ie |= 0x401U;
     }
 
     ::asyncLeaveIsrGroup(ISR_GROUP_CAN);
 }
 
-/**
- * CAN transmit interrupt service routine trampoline for FDCAN1.
- *
- * Enters the CAN ISR group, forwards the TX-complete event to the FdCanTransceiver,
- * and leaves the ISR group.
- *
- * \note ISR context — must not call blocking APIs or allocate memory.
- */
 void call_can_isr_TX()
 {
-    ::asyncEnterIsrGroup(ISR_GROUP_CAN);
-    ::bios::FdCanTransceiver::transmitInterrupt(::busid::CAN_0);
-    ::asyncLeaveIsrGroup(ISR_GROUP_CAN);
+    // Not used — all interrupts routed to IT0
 }
 }

@@ -171,7 +171,7 @@ void DemoSystem::cyclic()
             Logger::debug(DEMO, "Sending frame %d", canSentCount);
             etl::be_uint32_t canData{canSentCount};
             ::can::CANFrame frame(0x558, static_cast<uint8_t*>(canData.data()), 4);
-            canTransceiver->write(frame);
+            //canTransceiver->write(frame);
             ++canSentCount;
         }
     }

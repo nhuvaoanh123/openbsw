@@ -53,9 +53,6 @@ void vApplicationMallocFailedHook(void)
  */
 void vApplicationTickHook(void)
 {
-    // Feed IWDG every FreeRTOS tick (~1ms).
-    // The IWDG may have been enabled by a previous firmware and persists
-    // across soft resets — it cannot be disabled, only fed.
     IWDG->KR = 0xAAAAU;
 }
 }

@@ -120,14 +120,7 @@ extern "C"
  */
 void call_can_isr_RX()
 {
-    // Disable FMPIE0 FIRST — bxCAN FIFO is only 3 deep, heavy bus refills
-    // before ISR returns. This prevents ISR re-entry that trapped the CPU.
-    // Re-enabled in receiveTask() after async task drains the software queue.
     ::bios::BxCanTransceiver::disableRxInterrupt(::busid::CAN_0);
-
-    // asyncEnterIsrGroup/leaveIsrGroup required for async::execute() to
-    // properly notify the FreeRTOS task. Safe now because FMPIE0 is off —
-    // ISR won't re-enter even with getSystemTicks overhead.
     ::asyncEnterIsrGroup(ISR_GROUP_CAN);
 
     uint8_t framesReceived;
