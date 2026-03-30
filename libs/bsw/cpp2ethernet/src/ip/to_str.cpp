@@ -4,8 +4,6 @@
 
 #include <cstdio>
 
-// snprintf is used intentionally for fixed-format IPv4/IPv6 string rendering.
-// NOLINTBEGIN(cppcoreguidelines-pro-type-vararg)
 namespace ip
 {
 ::etl::span<char> to_str(IPAddress const& ipAddr, ::etl::span<char> const& buffer)
@@ -114,5 +112,3 @@ namespace ip
 }
 
 } /* namespace ip */
-
-// NOLINTEND(cppcoreguidelines-pro-type-vararg)

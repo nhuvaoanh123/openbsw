@@ -5,8 +5,6 @@
 #include "tcp/TcpLogger.h"
 #include "tcp/socket/AbstractSocket.h"
 
-// Logger API uses printf-style varargs for fixed diagnostic messages in this module.
-// NOLINTBEGIN(cppcoreguidelines-pro-type-vararg)
 namespace tcp
 {
 using ::util::logger::Logger;
@@ -37,5 +35,3 @@ void TcpIperf2Server::dataReceived(uint16_t const length)
 void TcpIperf2Server::connectionClosed(ErrorCode /* status */) { _locked = false; }
 
 } // namespace tcp
-
-// NOLINTEND(cppcoreguidelines-pro-type-vararg)

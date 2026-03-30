@@ -4,8 +4,6 @@
 
 #include <util/format/SharedStringWriter.h>
 
-// SharedStringWriter::printf uses a printf-style vararg interface by design.
-// NOLINTBEGIN(cppcoreguidelines-pro-type-vararg)
 namespace logger
 {
 DefaultLoggerCommand::DefaultLoggerCommand(IComponentConfig& componentConfig)
@@ -81,5 +79,3 @@ void DefaultLoggerCommand::levelCommand(::util::command::CommandContext& context
 }
 
 } /* namespace logger */
-
-// NOLINTEND(cppcoreguidelines-pro-type-vararg)

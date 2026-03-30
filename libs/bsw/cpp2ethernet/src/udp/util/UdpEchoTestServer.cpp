@@ -4,8 +4,6 @@
 
 #include <udp/UdpLogger.h>
 
-// Logger API uses printf-style varargs for fixed diagnostic messages in this module.
-// NOLINTBEGIN(cppcoreguidelines-pro-type-vararg)
 namespace udp
 {
 
@@ -72,5 +70,3 @@ void UdpEchoTestServer::dataReceived(
 }
 
 } // namespace udp
-
-// NOLINTEND(cppcoreguidelines-pro-type-vararg)
