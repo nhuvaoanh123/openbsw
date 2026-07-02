@@ -4,6 +4,8 @@ add_subdirectory(bspInterruptsImpl)
 add_subdirectory(bspUart)
 add_subdirectory(bspTimer)
 add_subdirectory(bspIo)
+add_subdirectory(bspAdc)
+add_subdirectory(bspEepromDriver)
 
 # Aggregated BSP target
 add_library(socBsp INTERFACE)
